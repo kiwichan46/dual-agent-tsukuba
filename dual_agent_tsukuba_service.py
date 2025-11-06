@@ -42,6 +42,19 @@ try:
 except Exception:
     raise SystemExit("openai パッケージが見つかりません。`pip install openai` を実行してください")
 
+# ---- 表示強化（Richは任意依存） -------------------------------------------
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.markdown import Markdown
+    console: Console | None = Console()
+except Exception:
+    console = None
+
+from datetime import datetime
+from pathlib import Path
+
 # ---- 簡易ユーティリティ -----------------------------------------------------
 import glob
 import re
@@ -309,6 +322,8 @@ def main():
     parser.add_argument("--k", type=int, default=5, help="各エージェントのRAG上位件数")
     parser.add_argument("--model", default="gpt-4.1-mini", help="生成モデル")
     parser.add_argument("--embed", default="text-embedding-3-large", help="埋め込みモデル")
+    parser.add_argument("--save-md", default=None, help="Markdownで結果を保存するパス（例: reports/result.md）")
+
     args = parser.parse_args()
 
     api_key = os.getenv("OPENAI_API_KEY")
@@ -328,19 +343,70 @@ def main():
     result = orchestrator.run(args.query, rounds=args.rounds, k=args.k)
 
     # 出力
-    print("\n===== 参考資料 上位ヒット: 筑波山麓 =====")
-    for r in result["agent1_topk"]:
-        print(f"{r['score']:.3f} | {r['source']}")
-    print("\n===== 参考資料 上位ヒット: 地方創生 =====")
-    for r in result["agent2_topk"]:
-        print(f"{r['score']:.3f} | {r['source']}")
+        # ------------------ 表示強化: Rich があればリッチ表示 ------------------
+    if console is not None:
+        console.rule("[bold]参考資料 上位ヒット")
+        # 筑波山麓
+        t1 = Table(title="筑波山麓", show_lines=True)
+        t1.add_column("score", justify="right")
+        t1.add_column("source", overflow="fold")
+        for r in result["agent1_topk"]:
+            t1.add_row(f"{r['score']:.3f}", r["source"])
+        console.print(t1)
+        # 地方創生
+        t2 = Table(title="地方創生", show_lines=True)
+        t2.add_column("score", justify="right")
+        t2.add_column("source", overflow="fold")
+        for r in result["agent2_topk"]:
+            t2.add_row(f"{r['score']:.3f}", r["source"])
+        console.print(t2)
 
-    print("\n===== 議論ログ（抜粋） =====")
-    for speaker, content in result["dialogue"][-4:]:  # 末尾少量だけ表示
-        print(f"\n## {speaker}\n{content[:1200]}\n...")
+        console.rule("[bold]議論ログ（直近の発言）")
+        for speaker, content in result["dialogue"][-4:]:
+            console.print(Panel.fit(
+                content[:1500] + ("..." if len(content) > 1500 else ""),
+                title=speaker
+            ))
 
-    print("\n===== 統合サマリ =====\n")
-    print(result["summary"])
+        console.rule("[bold]統合サマリ")
+        console.print(Markdown(result["summary"]))
+    else:
+        # フォールバックの従来表示
+        print("\n===== 参考資料 上位ヒット: 筑波山麓 =====")
+        for r in result["agent1_topk"]:
+            print(f"{r['score']:.3f} | {r['source']}")
+        print("\n===== 参考資料 上位ヒット: 地方創生 =====")
+        for r in result["agent2_topk"]:
+            print(f"{r['score']:.3f} | {r['source']}")
+        print("\n===== 議論ログ（抜粋） =====")
+        for speaker, content in result["dialogue"][-4:]:
+            print(f"\n## {speaker}\n{content[:1200]}\n...")
+        print("\n===== 統合サマリ =====\n")
+        print(result["summary"])
+
+    # ------------------ Markdown保存（任意） ------------------
+    if args.save_md:
+        out_path = Path(args.save_md)
+        if not out_path.parent.exists():
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        md = [
+            f"# 実行結果 ({ts})\n",
+            "## 参考資料 上位ヒット: 筑波山麓\n",
+            "\n".join([f"- {r['score']:.3f} | {r['source']}" for r in result["agent1_topk"]]),
+            "\n\n## 参考資料 上位ヒット: 地方創生\n",
+            "\n".join([f"- {r['score']:.3f} | {r['source']}" for r in result["agent2_topk"]]),
+            "\n\n## 議論ログ（抜粋）\n",
+            "\n\n".join([f"### {speaker}\n\n{content}" for speaker, content in result["dialogue"][-4:]]),
+            "\n\n## 統合サマリ\n",
+            result["summary"],
+        ]
+        out_path.write_text("\n".join(md), encoding="utf-8")
+        if console is not None:
+            console.print(Panel.fit(f"Markdownとして保存しました: {out_path}", title="保存完了"))
+        else:
+            print(f"\n[保存] {out_path}")
+
 
 
 if __name__ == "__main__":
